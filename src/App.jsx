@@ -42,9 +42,14 @@ function playChime() {
       osc.stop(now + i * 0.18 + 0.4);
     });
     setTimeout(() => ctx.close(), 1200);
+    // eslint-disable-next-line no-unused-vars
   } catch (e) {
     // Web Audio unavailable — fail silently.
   }
+}
+// Exposed for manual testing from the browser console: just run `playChime()`.
+if (typeof window !== "undefined") {
+  window.playChime = playChime;
 }
 
 function Dial({ progress, running, timeLabel, label }) {
@@ -119,6 +124,7 @@ function usePersistedState(key, initialValue, reviver) {
       if (stored === null) return initialValue;
       const parsed = JSON.parse(stored);
       return reviver ? reviver(parsed) : parsed;
+      // eslint-disable-next-line no-unused-vars
     } catch (e) {
       return initialValue;
     }
@@ -126,6 +132,7 @@ function usePersistedState(key, initialValue, reviver) {
   useEffect(() => {
     try {
       window.localStorage.setItem(key, JSON.stringify(state));
+      // eslint-disable-next-line no-unused-vars
     } catch (e) {
       // Storage unavailable (private browsing, quota, etc.) — app still works, just won't persist.
     }
@@ -150,6 +157,7 @@ export default function App() {
 
   const totalSeconds = durationMin * 60;
   const progress = 1 - secondsLeft / totalSeconds;
+  const completedRef = useRef(false);
 
   const logSession = useCallback(
     (completed) => {
@@ -166,34 +174,40 @@ export default function App() {
         },
       ]);
     },
-    [intention, durationMin, tasks]
+    [setSessions, intention, durationMin, tasks]
   );
 
+  // Ticks the countdown down. This updater is kept pure — no side effects here —
+  // since React Strict Mode can invoke setState updater functions twice.
   useEffect(() => {
     if (running) {
       intervalRef.current = setInterval(() => {
-        setSecondsLeft((s) => {
-          if (s <= 1) {
-            clearInterval(intervalRef.current);
-            setRunning(false);
-            logSession(true);
-            if (soundOn) playChime();
-            if ("Notification" in window && Notification.permission === "granted") {
-              new Notification("Focus session complete", {
-                body: intention ? `"${intention}" — ${durationMin}m done` : `${durationMin}m session done`,
-              });
-            }
-            return 0;
-          }
-          return s - 1;
-        });
+        setSecondsLeft((s) => (s > 0 ? s - 1 : 0));
       }, 1000);
     } else if (intervalRef.current) {
       clearInterval(intervalRef.current);
     }
     return () => clearInterval(intervalRef.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, logSession, soundOn]);
+  }, [running]);
+
+  // Fires exactly once when the countdown reaches zero, guarded by a ref
+  // so Strict Mode's double-render in development can't trigger it twice.
+  useEffect(() => {
+    if (secondsLeft === 0 && running && !completedRef.current) {
+      completedRef.current = true;
+      setRunning(false);
+      logSession(true);
+      if (soundOn) playChime();
+      if ("Notification" in window && Notification.permission === "granted") {
+        new Notification("Focus session complete", {
+          body: intention ? `"${intention}" — ${durationMin}m done` : `${durationMin}m session done`,
+        });
+      }
+    }
+    if (secondsLeft > 0) {
+      completedRef.current = false;
+    }
+  }, [secondsLeft, running, soundOn, logSession, intention, durationMin]);
 
   const handleStartPause = () => {
     if (secondsLeft === 0) {
