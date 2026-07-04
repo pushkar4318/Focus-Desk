@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Play, Pause, RotateCcw, Plus, X, Check } from "lucide-react";
+import { Play, Pause, RotateCcw, Plus, X, Check, Bell, BellOff, Pencil } from "lucide-react";
 
 const DURATIONS = [15, 25, 45, 60];
 
@@ -22,8 +22,32 @@ function formatTime(totalSeconds) {
   return `${m}:${s}`;
 }
 
+// Plays a short two-tone chime using the Web Audio API — no external audio file needed.
+function playChime() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const now = ctx.currentTime;
+    [523.25, 659.25].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, now + i * 0.18);
+      gain.gain.linearRampToValueAtTime(0.18, now + i * 0.18 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.18 + 0.4);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + i * 0.18);
+      osc.stop(now + i * 0.18 + 0.4);
+    });
+    setTimeout(() => ctx.close(), 1200);
+  } catch (e) {
+    // Web Audio unavailable — fail silently.
+  }
+}
+
 function Dial({ progress, running, timeLabel, label }) {
-  // progress: 0 (start) -> 1 (complete)
   const size = 280;
   const cx = size / 2;
   const cy = size / 2;
@@ -62,14 +86,7 @@ function Dial({ progress, running, timeLabel, label }) {
       <circle cx={cx} cy={cy} r={r + 26} fill="none" stroke={COLORS.mist} strokeWidth={1} />
       {ticks}
       <circle cx={cx} cy={cy} r={r} fill={COLORS.inkPanel} stroke={COLORS.mist} strokeWidth={2} />
-      <circle
-        cx={cx}
-        cy={cy}
-        r={r}
-        fill="none"
-        stroke={COLORS.mist}
-        strokeWidth={6}
-      />
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke={COLORS.mist} strokeWidth={6} />
       <circle
         cx={cx}
         cy={cy}
@@ -83,40 +100,52 @@ function Dial({ progress, running, timeLabel, label }) {
         transform={`rotate(-90 ${cx} ${cy})`}
         style={{ transition: "stroke-dashoffset 0.9s linear" }}
       />
-      <text
-        x={cx}
-        y={cy - 6}
-        textAnchor="middle"
-        fontFamily="'IBM Plex Mono', monospace"
-        fontSize="42"
-        fontWeight="500"
-        fill={COLORS.paper}
-      >
+      <text x={cx} y={cy - 6} textAnchor="middle" fontFamily="'IBM Plex Mono', monospace" fontSize="42" fontWeight="500" fill={COLORS.paper}>
         {timeLabel}
       </text>
-      <text
-        x={cx}
-        y={cy + 26}
-        textAnchor="middle"
-        fontFamily="'Inter', sans-serif"
-        fontSize="11"
-        letterSpacing="2"
-        fill={COLORS.slate}
-      >
+      <text x={cx} y={cy + 26} textAnchor="middle" fontFamily="'Inter', sans-serif" fontSize="11" letterSpacing="2" fill={COLORS.slate}>
         {label}
       </text>
     </svg>
   );
 }
 
-export default function FocusDesk() {
-  const [durationMin, setDurationMin] = useState(25);
-  const [secondsLeft, setSecondsLeft] = useState(25 * 60);
+// Reads/writes a piece of state to localStorage under the given key.
+// Falls back to the initial value if localStorage is unavailable or empty.
+function usePersistedState(key, initialValue, reviver) {
+  const [state, setState] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(key);
+      if (stored === null) return initialValue;
+      const parsed = JSON.parse(stored);
+      return reviver ? reviver(parsed) : parsed;
+    } catch (e) {
+      return initialValue;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(state));
+    } catch (e) {
+      // Storage unavailable (private browsing, quota, etc.) — app still works, just won't persist.
+    }
+  }, [key, state]);
+  return [state, setState];
+}
+
+export default function App() {
+  const [durationMin, setDurationMin] = usePersistedState("fd_durationMin", 25);
+  const [secondsLeft, setSecondsLeft] = useState(() => durationMin * 60);
   const [running, setRunning] = useState(false);
-  const [intention, setIntention] = useState("");
-  const [tasks, setTasks] = useState([]);
+  const [intention, setIntention] = usePersistedState("fd_intention", "");
+  const [tasks, setTasks] = usePersistedState("fd_tasks", []);
   const [newTask, setNewTask] = useState("");
-  const [sessions, setSessions] = useState([]); // {intention, minutes, completedTasks, time}
+  const [sessions, setSessions] = usePersistedState("fd_sessions", [], (parsed) =>
+    parsed.map((s) => ({ ...s, endedAt: new Date(s.endedAt) }))
+  );
+  const [soundOn, setSoundOn] = useState(true);
+  const [editingId, setEditingId] = useState(null);
+  const [editingText, setEditingText] = useState("");
   const intervalRef = useRef(null);
 
   const totalSeconds = durationMin * 60;
@@ -127,6 +156,7 @@ export default function FocusDesk() {
       setSessions((prev) => [
         ...prev,
         {
+          id: Date.now() + Math.random(),
           intention: intention || "Untitled session",
           minutes: durationMin,
           completedTasks: tasks.filter((t) => t.done).length,
@@ -147,6 +177,12 @@ export default function FocusDesk() {
             clearInterval(intervalRef.current);
             setRunning(false);
             logSession(true);
+            if (soundOn) playChime();
+            if ("Notification" in window && Notification.permission === "granted") {
+              new Notification("Focus session complete", {
+                body: intention ? `"${intention}" — ${durationMin}m done` : `${durationMin}m session done`,
+              });
+            }
             return 0;
           }
           return s - 1;
@@ -156,11 +192,15 @@ export default function FocusDesk() {
       clearInterval(intervalRef.current);
     }
     return () => clearInterval(intervalRef.current);
-  }, [running, logSession]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, logSession, soundOn]);
 
   const handleStartPause = () => {
     if (secondsLeft === 0) {
       setSecondsLeft(totalSeconds);
+    }
+    if (!running && "Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
     }
     setRunning((r) => !r);
   };
@@ -193,6 +233,22 @@ export default function FocusDesk() {
 
   const removeTask = (id) => {
     setTasks((prev) => prev.filter((t) => t.id !== id));
+  };
+
+  const deleteSession = (id) => {
+    setSessions((prev) => prev.filter((s) => s.id !== id));
+  };
+
+  const startEditing = (s) => {
+    setEditingId(s.id);
+    setEditingText(s.intention);
+  };
+
+  const commitEdit = (id) => {
+    const text = editingText.trim();
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, intention: text || s.intention } : s)));
+    setEditingId(null);
+    setEditingText("");
   };
 
   const dialLabel = secondsLeft === 0 ? "complete" : running ? "in session" : "ready";
@@ -231,6 +287,16 @@ export default function FocusDesk() {
         .fd-btn-primary:hover { background: #d8a852; color: ${COLORS.ink}; border-color: #d8a852; }
         .fd-scroll::-webkit-scrollbar { width: 6px; }
         .fd-scroll::-webkit-scrollbar-thumb { background: ${COLORS.mist}; border-radius: 3px; }
+        .fd-icon-btn {
+          background: transparent;
+          border: none;
+          color: ${COLORS.slateDark};
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          padding: 2px;
+        }
+        .fd-icon-btn:hover { color: ${COLORS.brass}; }
       `}</style>
 
       <div style={{ maxWidth: 880, margin: "0 auto", padding: "40px 24px 64px" }}>
@@ -246,24 +312,27 @@ export default function FocusDesk() {
           }}
         >
           <div>
-            <div
-              style={{
-                fontFamily: "'Fraunces', serif",
-                fontSize: 26,
-                fontWeight: 500,
-                letterSpacing: 0.3,
-              }}
-            >
-              Focus desk
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 26, fontWeight: 500, letterSpacing: 0.3 }}>
+              Focus deck
             </div>
             <div style={{ fontSize: 12, color: COLORS.slate, marginTop: 2, letterSpacing: 0.5 }}>
               a logbook for deep work
             </div>
           </div>
-          <div style={{ fontSize: 12, color: COLORS.slate, textAlign: "right" }}>
-            session {sessions.length + 1}
-            <br />
-            {new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <button
+              onClick={() => setSoundOn((v) => !v)}
+              className="fd-icon-btn"
+              aria-label={soundOn ? "Mute session end sound" : "Unmute session end sound"}
+              title={soundOn ? "Sound on" : "Sound off"}
+            >
+              {soundOn ? <Bell size={16} /> : <BellOff size={16} />}
+            </button>
+            <div style={{ fontSize: 12, color: COLORS.slate, textAlign: "right" }}>
+              session {sessions.length + 1}
+              <br />
+              {new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}
+            </div>
           </div>
         </div>
 
@@ -519,12 +588,12 @@ export default function FocusDesk() {
               {sessions
                 .slice()
                 .reverse()
-                .map((s, i) => (
+                .map((s) => (
                   <div
-                    key={i}
+                    key={s.id}
                     style={{
                       display: "grid",
-                      gridTemplateColumns: "70px 1fr 90px 60px",
+                      gridTemplateColumns: "70px 1fr 90px 60px 56px",
                       alignItems: "center",
                       gap: 12,
                       padding: "10px 0",
@@ -535,7 +604,37 @@ export default function FocusDesk() {
                     <span style={{ color: COLORS.slate, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>
                       {s.endedAt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
                     </span>
-                    <span style={{ color: COLORS.paper }}>{s.intention}</span>
+
+                    {editingId === s.id ? (
+                      <input
+                        autoFocus
+                        type="text"
+                        value={editingText}
+                        onChange={(e) => setEditingText(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && commitEdit(s.id)}
+                        onBlur={() => commitEdit(s.id)}
+                        style={{
+                          background: COLORS.inkPanel,
+                          border: `1px solid ${COLORS.brass}`,
+                          color: COLORS.paper,
+                          fontSize: 13,
+                          padding: "4px 6px",
+                          borderRadius: 4,
+                          outline: "none",
+                          fontFamily: "'Inter', sans-serif",
+                        }}
+                      />
+                    ) : (
+                      <span
+                        onClick={() => startEditing(s)}
+                        style={{ color: COLORS.paper, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}
+                        title="Click to rename"
+                      >
+                        {s.intention}
+                        <Pencil size={11} color={COLORS.slateDark} />
+                      </span>
+                    )}
+
                     <span style={{ color: COLORS.slate, fontSize: 12 }}>
                       {s.totalTasks > 0 ? `${s.completedTasks}/${s.totalTasks} tasks` : "—"}
                     </span>
@@ -549,6 +648,15 @@ export default function FocusDesk() {
                     >
                       {s.completed ? `${s.minutes}m done` : "stopped"}
                     </span>
+                    <button
+                      onClick={() => deleteSession(s.id)}
+                      className="fd-icon-btn"
+                      style={{ justifyContent: "flex-end" }}
+                      aria-label="Delete session"
+                      title="Delete entry"
+                    >
+                      <X size={14} />
+                    </button>
                   </div>
                 ))}
             </div>
